@@ -1,0 +1,153 @@
+#!/usr/bin/env python
+import os
+import sys
+import glob
+import argparse
+import subprocess as sp
+
+datasets = [
+    '20200313_4kids',
+    '20200810_20kids',
+    '20211005_4morekids',
+    ]
+
+cellranger_version = '4.0.0'
+cellranger_bind = {
+    '3.1.0': 'cellranger',
+    '4.0.0': 'cellranger-4.0.0',
+    }
+
+
+data_fdn = '/home/fabio/projects/dengue_patients/sequencing_data/'
+fastq_fdn = data_fdn+'fastq/'
+ref_root_fdn = data_fdn+'references/'
+
+def find_samples(dataset):
+    return os.listdir(f'{fastq_fdn}{dataset}')
+
+
+def subsample_fastq(fdn, nmax=400_000_000):
+    '''Subsample reads and store into another folder'''
+    import random
+    import gzip
+    from Bio.SeqIO.QualityIO import FastqGeneralIterator as FGI
+
+    print(f'Original folder: {fdn}')
+    fns = [x for x in os.listdir(fdn) if x.endswith('fastq.gz')]
+    print(f'Files in that folder: {fns}')
+    subfdn = f'{fdn}/subsample_{nmax}'
+    print(f'Subsample folder: {subfdn}')
+    if os.path.isdir(subfdn):
+        return subfdn
+
+    os.makedirs(subfdn, exist_ok=False)
+
+    print('Counting reads')
+    fn_tmp = fdn+'/tmp'
+    ntmp = 10000
+    with gzip.open(fdn+'/'+fns[0], 'rt') as f:
+        with gzip.open(fn_tmp, 'wt') as ftmp:
+            for ir, read in enumerate(FGI(f)):
+                if ir >= ntmp:
+                    break
+                ftmp.write('@'+read[0]+'\n'+read[1]+'\n+\n'+read[2]+'\n')
+    st_full = os.stat(fdn+'/'+fns[0])
+    st_tmp = os.stat(fn_tmp)
+    ntot = int(1.0 * st_full.st_size / st_tmp.st_size * ntmp)
+    os.remove(fn_tmp)
+    print(f'# reads: {ntot}')
+
+    rand_thre = 1.0 * nmax / ntot
+    print('Random threshld: {:.3f}'.format(rand_thre))
+
+    print('Writing output files')
+    nout = 0
+    fn_ins = [fdn+'/'+x for x in fns]
+    fn_outs = [subfdn+'/'+x for x in fns]
+    print(fn_ins)
+    print(fn_outs)
+    with gzip.open(fn_ins[0], 'rt') as fi1, gzip.open(fn_ins[1], 'rt') as fi2:
+        with gzip.open(fn_outs[0], 'wt') as fo1, gzip.open(fn_outs[1], 'wt') as fo2:
+            for ir, (r1, r2) in enumerate(zip(FGI(fi1), FGI(fi2))):
+                rnd = random.random()
+                if rnd > rand_thre:
+                    continue
+                fo1.write('@'+r1[0]+'\n'+r1[1]+'\n+\n'+r1[2]+'\n')
+                fo2.write('@'+r2[0]+'\n'+r2[1]+'\n+\n'+r2[2]+'\n')
+                nout += 1
+                if (nout % 10000) == 0:
+                    print(nout, end='\r')
+
+    return subfdn
+
+
+if __name__ == '__main__':
+
+    pa = argparse.ArgumentParser()
+    pa.add_argument('--cellranger-version', choices=['3.1.0', '4.0.0'],
+                    required=True)
+    pa.add_argument('--dataset', choices=datasets, default=datasets[-1])
+    runname = pa.parse_known_args()[0].dataset
+    samplenames = find_samples(runname)
+
+    pa.add_argument('--sample', choices=samplenames,
+                    action='append')
+    pa.add_argument('--localcores', type=int, default=20)
+    pa.add_argument('--localmem', type=int, default=128)
+    pa.add_argument('--dry', action='store_true')
+    args = pa.parse_args()
+
+    cellranger_version = args.cellranger_version
+    ref_fdn = f'{ref_root_fdn}refdata-cellranger-vdj-GRCh38-alts-ensembl-{cellranger_version}'
+    cellranger_bin = cellranger_bind[cellranger_version]
+
+    sns = args.sample
+    if not sns:
+        sns = list(samplenames)
+        # FIXME: exclude 1_019_01 because it is larger than anything
+        # else put together, will investigate
+        #sns = [x for x in sns if x != '1_019_01']
+        overwrite = False
+    else:
+        overwrite = True
+
+    for sn in sns:
+        print(f'Sample: {sn}')
+
+        out_fdn = data_fdn+f'vdj/{runname}/{sn}/'
+        if (not overwrite) and os.path.isdir(out_fdn+sn):
+            print('Output folder exists, skipping')
+            continue
+
+        fastq_sample_fdn = fastq_fdn+runname+'/'+sn
+
+        # Check if there are subfolders for separate lanes
+        sfdn = []
+        for x in os.listdir(fastq_sample_fdn):
+            if os.path.isdir(fastq_sample_fdn+'/'+x):
+                if 'subsample' in x:
+                    continue
+                sfdn.append(fastq_sample_fdn+'/'+x)
+        if len(sfdn):
+            fastq_sample_fdn = ','.join(sfdn)
+
+        if sn == '1_019_01':
+            print('Subsample fastqs (too many reads)')
+            fastq_sample_fdn = subsample_fastq(fastq_sample_fdn)
+
+        # TODO: cellranger 4.0 fails on this sample because
+        # of some kind of sampling issue with TCRs. Seems like
+        # specifying --chain IG saves at least th BCRs, but
+        # let's see later on
+        call = '{5} vdj --id {0} --fastqs={1} --sample {0} --reference {2} --localcores {3} --localmem {4}'.format(
+                sn, fastq_sample_fdn, ref_fdn,
+                args.localcores, args.localmem,
+                cellranger_bin,
+                )
+        print(call)
+
+        # Make output folder
+        os.makedirs(out_fdn, exist_ok=True)
+
+        if not args.dry:
+            sp.run(call, shell=True, cwd=out_fdn, check=True)

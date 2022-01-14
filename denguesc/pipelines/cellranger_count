@@ -1,0 +1,43 @@
+#!/usr/bin/env python
+import os
+import sys
+import argparse
+import subprocess as sp
+
+
+samplenames = [
+    ('20200313_4kids', '3_012_01'),
+    ('20200313_4kids', '3_019_01'),
+    ('20200313_4kids', '3_037_01'),
+    ('20200313_4kids', '6_023_01'),
+    ]
+sampledict = {x[1]: x for x in samplenames}
+
+
+data_fdn = '/home/fabio/projects/dengue_patients/sequencing_data/'
+fastq_fdn = data_fdn+'fastq/'
+ref_root_fdn = data_fdn+'references/'
+
+
+if __name__ == '__main__':
+
+    pa = argparse.ArgumentParser()
+    pa.add_argument('--sample', choices=list(sampledict.keys()), required=True)
+    args = pa.parse_args()
+
+    sn = args.sample
+    runname, _ = sampledict[sn]
+
+    fastq_sample_fdn = fastq_fdn+runname+'/'+sn
+    ref_fdn = ref_root_fdn+'Human_GRC38_plus_DENV2_16681'
+
+    call = 'cellranger count --id {0} --fastqs={1} --sample {0} --transcriptome {2} --disable-ui --nosecondary'.format(
+            sn, fastq_sample_fdn, ref_fdn,
+            )
+    print(call)
+
+    # Make output folder
+    out_fdn = data_fdn+'counts/{0}/{1}/'.format(runname, sn)
+    os.makedirs(out_fdn, exist_ok=True)
+
+    sp.run(call, shell=True, cwd=out_fdn, check=True)
